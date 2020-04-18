@@ -30,6 +30,7 @@ import org.apache.kafka.connect.connector.policy.ConnectorClientConfigRequest;
 import org.apache.kafka.connect.errors.NotFoundException;
 import org.apache.kafka.connect.runtime.distributed.ClusterConfigState;
 import org.apache.kafka.connect.runtime.isolation.Plugins;
+import org.apache.kafka.connect.runtime.rest.entities.ActiveTopicsInfo;
 import org.apache.kafka.connect.runtime.rest.entities.ConfigInfo;
 import org.apache.kafka.connect.runtime.rest.entities.ConfigInfos;
 import org.apache.kafka.connect.runtime.rest.entities.ConfigKeyInfo;
@@ -62,6 +63,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Abstract Herder implementation which handles connector/task lifecycle tracking. Extensions
@@ -261,6 +263,25 @@ public abstract class AbstractHerder implements Herder, TaskStatus.Listener, Con
     }
 
     @Override
+    public ActiveTopicsInfo connectorActiveTopics(String connName) {
+        Collection<String> topics = statusBackingStore.getAllTopics(connName).stream()
+                .map(TopicStatus::topic)
+                .collect(Collectors.toList());
+        return new ActiveTopicsInfo(connName, topics);
+    }
+
+    @Override
+    public void resetConnectorActiveTopics(String connName) {
+        statusBackingStore.getAllTopics(connName).stream()
+                .forEach(status -> statusBackingStore.deleteTopic(status.connector(), status.topic()));
+    }
+
+    @Override
+    public StatusBackingStore statusBackingStore() {
+        return statusBackingStore;
+    }
+
+    @Override
     public ConnectorStateInfo.TaskState taskStatus(ConnectorTaskId id) {
         TaskStatus status = statusBackingStore.get(id);
 
@@ -279,6 +300,11 @@ public abstract class AbstractHerder implements Herder, TaskStatus.Listener, Con
 
     @Override
     public ConfigInfos validateConnectorConfig(Map<String, String> connectorProps) {
+        return validateConnectorConfig(connectorProps, true);
+    }
+
+    @Override
+    public ConfigInfos validateConnectorConfig(Map<String, String> connectorProps, boolean doLog) {
         if (worker.configTransformer() != null) {
             connectorProps = worker.configTransformer().transform(connectorProps);
         }
@@ -333,7 +359,7 @@ public abstract class AbstractHerder implements Herder, TaskStatus.Listener, Con
             configValues.addAll(config.configValues());
             ConfigInfos configInfos =  generateResult(connType, configKeys, configValues, new ArrayList<>(allGroups));
 
-            AbstractConfig connectorConfig = new AbstractConfig(new ConfigDef(), connectorProps);
+            AbstractConfig connectorConfig = new AbstractConfig(new ConfigDef(), connectorProps, doLog);
             String connName = connectorProps.get(ConnectorConfig.NAME_CONFIG);
             ConfigInfos producerConfigInfos = null;
             ConfigInfos consumerConfigInfos = null;
@@ -403,7 +429,16 @@ public abstract class AbstractHerder implements Herder, TaskStatus.Listener, Con
         List<ConfigInfo> configInfoList = new LinkedList<>();
         Map<String, ConfigKey> configKeys = configDef.configKeys();
         Set<String> groups = new LinkedHashSet<>();
-        Map<String, Object> clientConfigs = connectorConfig.originalsWithPrefix(prefix);
+        Map<String, Object> clientConfigs = new HashMap<>();
+        for (Map.Entry<String, Object> rawClientConfig : connectorConfig.originalsWithPrefix(prefix).entrySet()) {
+            String configName = rawClientConfig.getKey();
+            Object rawConfigValue = rawClientConfig.getValue();
+            ConfigKey configKey = configDef.configKeys().get(configName);
+            Object parsedConfigValue = configKey != null
+                ? ConfigDef.parseType(configName, rawConfigValue, configKey.type)
+                : rawConfigValue;
+            clientConfigs.put(configName, parsedConfigValue);
+        }
         ConnectorClientConfigRequest connectorClientConfigRequest = new ConnectorClientConfigRequest(
             connName, connectorType, connectorClass, clientConfigs, clientType);
         List<ConfigValue> configValues = connectorClientConfigOverridePolicy.validate(connectorClientConfigRequest);
@@ -547,7 +582,7 @@ public abstract class AbstractHerder implements Herder, TaskStatus.Listener, Con
             callback.onCompletion(
                 new BadRequestException(
                     messages.append(
-                        "\nYou can also find the above list of errors at the endpoint `/{connectorType}/config/validate`"
+                        "\nYou can also find the above list of errors at the endpoint `/connector-plugins/{connectorType}/config/validate`"
                     ).toString()
                 ), null
             );
@@ -589,12 +624,13 @@ public abstract class AbstractHerder implements Herder, TaskStatus.Listener, Con
         return result;
     }
 
-    private static Set<String> keysWithVariableValues(Map<String, String> rawConfig, Pattern pattern) {
+    // Visible for testing
+    static Set<String> keysWithVariableValues(Map<String, String> rawConfig, Pattern pattern) {
         Set<String> keys = new HashSet<>();
         for (Map.Entry<String, String> config : rawConfig.entrySet()) {
             if (config.getValue() != null) {
                 Matcher matcher = pattern.matcher(config.getValue());
-                if (matcher.matches()) {
+                if (matcher.find()) {
                     keys.add(config.getKey());
                 }
             }

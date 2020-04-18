@@ -18,6 +18,7 @@ package org.apache.kafka.connect.runtime.rest.resources;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import javax.ws.rs.core.HttpHeaders;
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
@@ -182,7 +183,7 @@ public class ConnectorPluginsResourceTest {
     @Before
     public void setUp() throws Exception {
         PowerMock.mockStatic(RestClient.class,
-                RestClient.class.getMethod("httpRequest", String.class, String.class, Object.class, TypeReference.class, WorkerConfig.class));
+                RestClient.class.getMethod("httpRequest", String.class, String.class, HttpHeaders.class, Object.class, TypeReference.class, WorkerConfig.class));
 
         plugins = PowerMock.createMock(Plugins.class);
         herder = PowerMock.createMock(AbstractHerder.class);
@@ -197,7 +198,7 @@ public class ConnectorPluginsResourceTest {
 
     @Test
     public void testValidateConfigWithSingleErrorDueToMissingConnectorClassname() throws Throwable {
-        herder.validateConnectorConfig(EasyMock.eq(partialProps));
+        herder.validateConnectorConfig(EasyMock.eq(partialProps), EasyMock.anyBoolean());
 
         PowerMock.expectLastCall().andAnswer((IAnswer<ConfigInfos>) () -> {
             ConfigDef connectorConfigDef = ConnectorConfig.configDef();
@@ -242,7 +243,7 @@ public class ConnectorPluginsResourceTest {
 
     @Test
     public void testValidateConfigWithSimpleName() throws Throwable {
-        herder.validateConnectorConfig(EasyMock.eq(props));
+        herder.validateConnectorConfig(EasyMock.eq(props), EasyMock.anyBoolean());
 
         PowerMock.expectLastCall().andAnswer((IAnswer<ConfigInfos>) () -> {
             ConfigDef connectorConfigDef = ConnectorConfig.configDef();
@@ -283,7 +284,7 @@ public class ConnectorPluginsResourceTest {
 
     @Test
     public void testValidateConfigWithAlias() throws Throwable {
-        herder.validateConnectorConfig(EasyMock.eq(props));
+        herder.validateConnectorConfig(EasyMock.eq(props), EasyMock.anyBoolean());
 
         PowerMock.expectLastCall().andAnswer((IAnswer<ConfigInfos>) () -> {
             ConfigDef connectorConfigDef = ConnectorConfig.configDef();
@@ -324,7 +325,7 @@ public class ConnectorPluginsResourceTest {
 
     @Test(expected = BadRequestException.class)
     public void testValidateConfigWithNonExistentName() throws Throwable {
-        herder.validateConnectorConfig(EasyMock.eq(props));
+        herder.validateConnectorConfig(EasyMock.eq(props), EasyMock.anyBoolean());
 
         PowerMock.expectLastCall().andAnswer((IAnswer<ConfigInfos>) () -> {
             ConfigDef connectorConfigDef = ConnectorConfig.configDef();
@@ -361,7 +362,7 @@ public class ConnectorPluginsResourceTest {
 
     @Test(expected = BadRequestException.class)
     public void testValidateConfigWithNonExistentAlias() throws Throwable {
-        herder.validateConnectorConfig(EasyMock.eq(props));
+        herder.validateConnectorConfig(EasyMock.eq(props), EasyMock.anyBoolean());
 
         PowerMock.expectLastCall().andAnswer((IAnswer<ConfigInfos>) () -> {
             ConfigDef connectorConfigDef = ConnectorConfig.configDef();
@@ -478,7 +479,7 @@ public class ConnectorPluginsResourceTest {
         public MockConnectorPluginDesc(Class<? extends Connector> klass) throws Exception {
             super(
                     klass,
-                    klass.newInstance().version(),
+                    klass.getConstructor().newInstance().version(),
                     new MockPluginClassLoader(null, new URL[0])
             );
         }

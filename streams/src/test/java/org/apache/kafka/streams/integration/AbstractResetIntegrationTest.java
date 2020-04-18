@@ -16,10 +16,9 @@
  */
 package org.apache.kafka.streams.integration;
 
-import java.time.Duration;
+import kafka.tools.StreamsResetter;
 import org.apache.kafka.clients.CommonClientConfigs;
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.ConsumerGroupDescription;
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.config.SslConfigs;
@@ -39,12 +38,9 @@ import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.integration.utils.EmbeddedKafkaCluster;
 import org.apache.kafka.streams.integration.utils.IntegrationTestUtils;
 import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.KeyValueMapper;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.TimeWindows;
-import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.test.IntegrationTest;
-import org.apache.kafka.test.TestCondition;
 import org.apache.kafka.test.TestUtils;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -56,6 +52,7 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.text.SimpleDateFormat;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -63,11 +60,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.ExecutionException;
-
-import kafka.tools.StreamsResetter;
 
 import static java.time.Duration.ofMillis;
+import static org.apache.kafka.streams.integration.utils.IntegrationTestUtils.waitForEmptyConsumerGroup;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 
@@ -78,7 +73,7 @@ public abstract class AbstractResetIntegrationTest {
 
     private static MockTime mockTime;
     private static KafkaStreams streams;
-    private static AdminClient adminClient = null;
+    private static Admin adminClient = null;
 
     abstract Map<String, Object> getClientSslConfig();
 
@@ -98,7 +93,7 @@ public abstract class AbstractResetIntegrationTest {
 
     private void prepareEnvironment() {
         if (adminClient == null) {
-            adminClient = AdminClient.create(commonClientConfig);
+            adminClient = Admin.create(commonClientConfig);
         }
 
         boolean timeSet = false;
@@ -171,29 +166,16 @@ public abstract class AbstractResetIntegrationTest {
 
     private static final long STREAMS_CONSUMER_TIMEOUT = 2000L;
     private static final long CLEANUP_CONSUMER_TIMEOUT = 2000L;
-    private static final int TIMEOUT_MULTIPLIER = 5;
-
-    private class ConsumerGroupInactiveCondition implements TestCondition {
-        @Override
-        public boolean conditionMet() {
-            try {
-                final ConsumerGroupDescription groupDescription = adminClient.describeConsumerGroups(Collections.singletonList(appID)).describedGroups().get(appID).get();
-                return groupDescription.members().isEmpty();
-            } catch (final ExecutionException | InterruptedException e) {
-                return false;
-            }
-        }
-    }
+    private static final int TIMEOUT_MULTIPLIER = 15;
 
     void prepareTest() throws Exception {
         prepareConfigs();
         prepareEnvironment();
 
-        // busy wait until cluster (ie, ConsumerGroupCoordinator) is available
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Test consumer group " + appID + " still active even after waiting " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT);
 
-        cluster.deleteAndRecreateTopics(INPUT_TOPIC, OUTPUT_TOPIC, OUTPUT_TOPIC_2, OUTPUT_TOPIC_2_RERUN);
+        cluster.deleteAllTopicsAndWait(120000);
+        cluster.createTopics(INPUT_TOPIC, OUTPUT_TOPIC, OUTPUT_TOPIC_2, OUTPUT_TOPIC_2_RERUN);
 
         add10InputElements();
     }
@@ -223,7 +205,7 @@ public abstract class AbstractResetIntegrationTest {
         }
     }
 
-    void shouldNotAllowToResetWhileStreamsIsRunning() throws Exception {
+    void shouldNotAllowToResetWhileStreamsIsRunning() {
         appID = testId + "-not-reset-during-runtime";
         final String[] parameters = new String[] {
             "--application-id", appID,
@@ -289,15 +271,13 @@ public abstract class AbstractResetIntegrationTest {
         final List<KeyValue<Long, Long>> result = IntegrationTestUtils.waitUntilMinKeyValueRecordsReceived(resultConsumerConfig, OUTPUT_TOPIC, 10);
 
         streams.close();
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT,
-            "Streams Application consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         // RESET
         streams = new KafkaStreams(setupTopologyWithoutIntermediateUserTopic(), streamsConfig);
         streams.cleanUp();
         cleanGlobal(false, null, null);
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         assertInternalTopicsGotDeleted(null);
 
@@ -308,8 +288,7 @@ public abstract class AbstractResetIntegrationTest {
 
         assertThat(resultRerun, equalTo(result));
 
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
         cleanGlobal(false, null, null);
     }
 
@@ -328,8 +307,7 @@ public abstract class AbstractResetIntegrationTest {
         final List<KeyValue<Long, Long>> result2 = IntegrationTestUtils.waitUntilMinKeyValueRecordsReceived(resultConsumerConfig, OUTPUT_TOPIC_2, 40);
 
         streams.close();
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT,
-            "Streams Application consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         // insert bad record to make sure intermediate user topic gets seekToEnd()
         mockTime.sleep(1);
@@ -344,8 +322,7 @@ public abstract class AbstractResetIntegrationTest {
         streams = new KafkaStreams(setupTopologyWithIntermediateUserTopic(OUTPUT_TOPIC_2_RERUN), streamsConfig);
         streams.cleanUp();
         cleanGlobal(true, null, null);
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         assertInternalTopicsGotDeleted(INTERMEDIATE_USER_TOPIC);
 
@@ -366,8 +343,7 @@ public abstract class AbstractResetIntegrationTest {
         }
         assertThat(resultIntermediate.get(10), equalTo(badMessage));
 
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
         cleanGlobal(true, null, null);
 
         cluster.deleteTopicAndWait(INTERMEDIATE_USER_TOPIC);
@@ -383,22 +359,19 @@ public abstract class AbstractResetIntegrationTest {
         final List<KeyValue<Long, Long>> result = IntegrationTestUtils.waitUntilMinKeyValueRecordsReceived(resultConsumerConfig, OUTPUT_TOPIC, 10);
 
         streams.close();
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT,
-            "Streams Application consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         // RESET
         final File resetFile = File.createTempFile("reset", ".csv");
         try (final BufferedWriter writer = new BufferedWriter(new FileWriter(resetFile))) {
             writer.write(INPUT_TOPIC + ",0,1");
-            writer.close();
         }
 
         streams = new KafkaStreams(setupTopologyWithoutIntermediateUserTopic(), streamsConfig);
         streams.cleanUp();
 
         cleanGlobal(false, "--from-file", resetFile.getAbsolutePath());
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         assertInternalTopicsGotDeleted(null);
 
@@ -412,8 +385,7 @@ public abstract class AbstractResetIntegrationTest {
         result.remove(0);
         assertThat(resultRerun, equalTo(result));
 
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
         cleanGlobal(false, null, null);
     }
 
@@ -427,14 +399,12 @@ public abstract class AbstractResetIntegrationTest {
         final List<KeyValue<Long, Long>> result = IntegrationTestUtils.waitUntilMinKeyValueRecordsReceived(resultConsumerConfig, OUTPUT_TOPIC, 10);
 
         streams.close();
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT,
-            "Streams Application consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         // RESET
         final File resetFile = File.createTempFile("reset", ".csv");
         try (final BufferedWriter writer = new BufferedWriter(new FileWriter(resetFile))) {
             writer.write(INPUT_TOPIC + ",0,1");
-            writer.close();
         }
 
         streams = new KafkaStreams(setupTopologyWithoutIntermediateUserTopic(), streamsConfig);
@@ -446,8 +416,7 @@ public abstract class AbstractResetIntegrationTest {
         calendar.add(Calendar.DATE, -1);
 
         cleanGlobal(false, "--to-datetime", format.format(calendar.getTime()));
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         assertInternalTopicsGotDeleted(null);
 
@@ -460,8 +429,7 @@ public abstract class AbstractResetIntegrationTest {
 
         assertThat(resultRerun, equalTo(result));
 
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-                "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
         cleanGlobal(false, null, null);
     }
 
@@ -475,22 +443,19 @@ public abstract class AbstractResetIntegrationTest {
         final List<KeyValue<Long, Long>> result = IntegrationTestUtils.waitUntilMinKeyValueRecordsReceived(resultConsumerConfig, OUTPUT_TOPIC, 10);
 
         streams.close();
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT,
-            "Streams Application consumer group " + appID + "  did not time out after " + (TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         // RESET
         final File resetFile = File.createTempFile("reset", ".csv");
         try (final BufferedWriter writer = new BufferedWriter(new FileWriter(resetFile))) {
             writer.write(INPUT_TOPIC + ",0,1");
-            writer.close();
         }
 
         streams = new KafkaStreams(setupTopologyWithoutIntermediateUserTopic(), streamsConfig);
         streams.cleanUp();
         cleanGlobal(false, "--by-duration", "PT1M");
 
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-            "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
 
         assertInternalTopicsGotDeleted(null);
 
@@ -503,8 +468,7 @@ public abstract class AbstractResetIntegrationTest {
 
         assertThat(resultRerun, equalTo(result));
 
-        TestUtils.waitForCondition(new ConsumerGroupInactiveCondition(), TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT,
-            "Reset Tool consumer group " + appID + " did not time out after " + (TIMEOUT_MULTIPLIER * CLEANUP_CONSUMER_TIMEOUT) + " ms.");
+        waitForEmptyConsumerGroup(adminClient, appID, TIMEOUT_MULTIPLIER * STREAMS_CONSUMER_TIMEOUT);
         cleanGlobal(false, null, null);
     }
 
@@ -514,12 +478,7 @@ public abstract class AbstractResetIntegrationTest {
         final KStream<Long, String> input = builder.stream(INPUT_TOPIC);
 
         // use map to trigger internal re-partitioning before groupByKey
-        input.map(new KeyValueMapper<Long, String, KeyValue<Long, String>>() {
-            @Override
-            public KeyValue<Long, String> apply(final Long key, final String value) {
-                return new KeyValue<>(key, value);
-            }
-        })
+        input.map(KeyValue::new)
             .groupByKey()
             .count()
             .toStream()
@@ -530,12 +489,7 @@ public abstract class AbstractResetIntegrationTest {
             .windowedBy(TimeWindows.of(ofMillis(35)).advanceBy(ofMillis(10)))
             .count()
             .toStream()
-            .map(new KeyValueMapper<Windowed<Long>, Long, KeyValue<Long, Long>>() {
-                @Override
-                public KeyValue<Long, Long> apply(final Windowed<Long> key, final Long value) {
-                    return new KeyValue<>(key.window().start() + key.window().end(), value);
-                }
-            })
+            .map((key, value) -> new KeyValue<>(key.window().start() + key.window().end(), value))
             .to(outputTopic2, Produced.with(Serdes.Long(), Serdes.Long()));
 
         return builder.build();
@@ -547,12 +501,8 @@ public abstract class AbstractResetIntegrationTest {
         final KStream<Long, String> input = builder.stream(INPUT_TOPIC);
 
         // use map to trigger internal re-partitioning before groupByKey
-        input.map(new KeyValueMapper<Long, String, KeyValue<Long, Long>>() {
-            @Override
-            public KeyValue<Long, Long> apply(final Long key, final String value) {
-                return new KeyValue<>(key, key);
-            }
-        }).to(OUTPUT_TOPIC, Produced.with(Serdes.Long(), Serdes.Long()));
+        input.map((key, value) -> new KeyValue<>(key, key))
+            .to(OUTPUT_TOPIC, Produced.with(Serdes.Long(), Serdes.Long()));
 
         return builder.build();
     }
@@ -590,7 +540,7 @@ public abstract class AbstractResetIntegrationTest {
             parameterList.add(resetScenarioArg);
         }
 
-        final String[] parameters = parameterList.toArray(new String[parameterList.size()]);
+        final String[] parameters = parameterList.toArray(new String[0]);
 
         final Properties cleanUpConfig = new Properties();
         cleanUpConfig.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 100);

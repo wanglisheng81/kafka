@@ -141,9 +141,9 @@ public class ConnectorConfig extends AbstractConfig {
             "although some information such as topic and partition number will still be logged.";
 
 
-    public static final String CONNECTOR_CLIENT_PRODUCER_OVERRIDES_PREFIX = "producer.overrides.";
-    public static final String CONNECTOR_CLIENT_CONSUMER_OVERRIDES_PREFIX = "consumer.overrides.";
-    public static final String CONNECTOR_CLIENT_ADMIN_OVERRIDES_PREFIX = "admin.overrides.";
+    public static final String CONNECTOR_CLIENT_PRODUCER_OVERRIDES_PREFIX = "producer.override.";
+    public static final String CONNECTOR_CLIENT_CONSUMER_OVERRIDES_PREFIX = "consumer.override.";
+    public static final String CONNECTOR_CLIENT_ADMIN_OVERRIDES_PREFIX = "admin.override.";
 
     private final EnrichedConnectorConfig enrichedConfig;
     private static class EnrichedConnectorConfig extends AbstractConfig {
@@ -331,7 +331,7 @@ public class ConnectorConfig extends AbstractConfig {
         }
         Transformation transformation;
         try {
-            transformation = transformationCls.asSubclass(Transformation.class).newInstance();
+            transformation = transformationCls.asSubclass(Transformation.class).getConstructor().newInstance();
         } catch (Exception e) {
             throw new ConfigException(key, String.valueOf(transformationCls), "Error getting config definition from Transformation: " + e.getMessage());
         }

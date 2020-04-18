@@ -47,12 +47,15 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.apache.kafka.connect.runtime.distributed.IncrementalCooperativeConnectProtocol.CONNECT_PROTOCOL_V1;
+import static org.apache.kafka.connect.runtime.distributed.IncrementalCooperativeConnectProtocol.CONNECT_PROTOCOL_V2;
 import static org.apache.kafka.connect.runtime.distributed.WorkerCoordinator.WorkerLoad;
 import static org.hamcrest.CoreMatchers.hasItems;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.runners.Parameterized.Parameter;
+import static org.junit.runners.Parameterized.Parameters;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -70,6 +73,14 @@ public class IncrementalCooperativeAssignorTest {
 
     @Captor
     ArgumentCaptor<Map<String, ExtendedAssignment>> assignmentsCapture;
+
+    @Parameters
+    public static Iterable<?> mode() {
+        return Arrays.asList(new Object[][] {{CONNECT_PROTOCOL_V1, CONNECT_PROTOCOL_V2}});
+    }
+
+    @Parameter
+    public short protocolVersion;
 
     private ClusterConfigState configState;
     private Map<String, ExtendedWorkerState> memberConfigs;
@@ -115,46 +126,52 @@ public class IncrementalCooperativeAssignorTest {
         doReturn(Collections.EMPTY_MAP).when(assignor).serializeAssignments(assignmentsCapture.capture());
 
         // First assignment with 1 worker and 2 connectors configured but not yet assigned
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(2, 8, 0, 0, "worker1");
 
         // Second assignment with a second worker joining and all connectors running on previous worker
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 1, 4, "worker1", "worker2");
 
         // Third assignment after revocations
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(1, 4, 0, 0, "worker1", "worker2");
 
         // A fourth rebalance should not change assignments
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1", "worker2");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -168,11 +185,12 @@ public class IncrementalCooperativeAssignorTest {
 
         // First assignment with 2 workers and 2 connectors configured but not yet assigned
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(2, 8, 0, 0, "worker1", "worker2");
 
         // Second assignment with only one worker remaining in the group. The worker that left the
@@ -181,11 +199,12 @@ public class IncrementalCooperativeAssignorTest {
         applyAssignments(returnedAssignments);
         assignments.remove("worker2");
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(rebalanceDelay, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1");
 
         time.sleep(rebalanceDelay / 2);
@@ -194,11 +213,12 @@ public class IncrementalCooperativeAssignorTest {
         // been reached yet
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(rebalanceDelay / 2, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1");
 
         time.sleep(rebalanceDelay / 2 + 1);
@@ -206,15 +226,18 @@ public class IncrementalCooperativeAssignorTest {
         // Fourth assignment after delay expired
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(1, 4, 0, 0, "worker1");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -228,11 +251,12 @@ public class IncrementalCooperativeAssignorTest {
 
         // First assignment with 2 workers and 2 connectors configured but not yet assigned
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(2, 8, 0, 0, "worker1", "worker2");
 
         // Second assignment with only one worker remaining in the group. The worker that left the
@@ -241,11 +265,12 @@ public class IncrementalCooperativeAssignorTest {
         applyAssignments(returnedAssignments);
         assignments.remove("worker2");
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(rebalanceDelay, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1");
 
         time.sleep(rebalanceDelay / 2);
@@ -254,11 +279,12 @@ public class IncrementalCooperativeAssignorTest {
         // been reached yet
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(rebalanceDelay / 2, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1");
 
         time.sleep(rebalanceDelay / 4);
@@ -268,11 +294,12 @@ public class IncrementalCooperativeAssignorTest {
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(rebalanceDelay / 4, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1", "worker2");
 
         time.sleep(rebalanceDelay / 4);
@@ -281,15 +308,18 @@ public class IncrementalCooperativeAssignorTest {
         // assignments ought to be assigned to the worker that has appeared as returned.
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(1, 4, 0, 0, "worker1", "worker2");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -301,16 +331,18 @@ public class IncrementalCooperativeAssignorTest {
         when(coordinator.configSnapshot()).thenReturn(configState);
         doReturn(Collections.EMPTY_MAP).when(assignor).serializeAssignments(assignmentsCapture.capture());
 
-        // First assignment with 2 workers and 2 connectors configured but not yet assigned
+        // First assignment with 3 workers and 2 connectors configured but not yet assigned
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        memberConfigs.put("worker3", new ExtendedWorkerState(leaderUrl, offset, null));
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
-        assertAssignment(2, 8, 0, 0, "worker1", "worker2");
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
+        assertAssignment(2, 8, 0, 0, "worker1", "worker2", "worker3");
 
-        // Second assignment with only one worker remaining in the group. The worker that left the
+        // Second assignment with two workers remaining in the group. The worker that left the
         // group was the leader. The new leader has no previous assignments and is not tracking a
         // delay upon a leader's exit
         applyAssignments(returnedAssignments);
@@ -323,24 +355,28 @@ public class IncrementalCooperativeAssignorTest {
 
         // Capture needs to be reset to point to the new assignor
         doReturn(Collections.EMPTY_MAP).when(assignor).serializeAssignments(assignmentsCapture.capture());
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
-        assertAssignment(1, 4, 0, 0, "worker2");
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
+        assertAssignment(1, 3, 0, 0, "worker2", "worker3");
 
         // Third (incidental) assignment with still only one worker in the group.
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
-        assertAssignment(0, 0, 0, 0, "worker2");
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
+        assertAssignment(0, 0, 0, 0, "worker2", "worker3");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -352,16 +388,18 @@ public class IncrementalCooperativeAssignorTest {
         when(coordinator.configSnapshot()).thenReturn(configState);
         doReturn(Collections.EMPTY_MAP).when(assignor).serializeAssignments(assignmentsCapture.capture());
 
-        // First assignment with 2 workers and 2 connectors configured but not yet assigned
+        // First assignment with 3 workers and 2 connectors configured but not yet assigned
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        memberConfigs.put("worker3", new ExtendedWorkerState(leaderUrl, offset, null));
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
-        assertAssignment(2, 8, 0, 0, "worker1", "worker2");
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
+        assertAssignment(2, 8, 0, 0, "worker1", "worker2", "worker3");
 
-        // Second assignment with only one worker remaining in the group. The worker that left the
+        // Second assignment with two workers remaining in the group. The worker that left the
         // group was the leader. The new leader has no previous assignments and is not tracking a
         // delay upon a leader's exit
         applyAssignments(returnedAssignments);
@@ -374,12 +412,13 @@ public class IncrementalCooperativeAssignorTest {
 
         // Capture needs to be reset to point to the new assignor
         doReturn(Collections.EMPTY_MAP).when(assignor).serializeAssignments(assignmentsCapture.capture());
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
-        assertAssignment(1, 4, 0, 0, "worker2");
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
+        assertAssignment(1, 3, 0, 0, "worker2", "worker3");
 
         // Third assignment with the previous leader returning as a follower. In this case, the
         // arrival of the previous leader is treated as an arrival of a new worker. Reassignment
@@ -387,24 +426,28 @@ public class IncrementalCooperativeAssignorTest {
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
         memberConfigs.put("worker1", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
-        assertAssignment(0, 0, 1, 4, "worker1", "worker2");
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
+        assertAssignment(0, 0, 0, 2, "worker1", "worker2", "worker3");
 
         // Fourth assignment after revocations
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
-        assertAssignment(1, 4, 0, 0, "worker1", "worker2");
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
+        assertAssignment(0, 2, 0, 0, "worker1", "worker2", "worker3");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -420,7 +463,7 @@ public class IncrementalCooperativeAssignorTest {
         // First assignment with 2 workers and 2 connectors configured but not yet assigned
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
         try {
-            assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+            assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         } catch (RuntimeException e) {
             RequestFuture.failure(e);
         }
@@ -429,6 +472,7 @@ public class IncrementalCooperativeAssignorTest {
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
         // This was the assignment that should have been sent, but didn't make it after all the way
         assertDelay(0, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(2, 8, 0, 0, "worker1", "worker2");
 
         // Second assignment happens with members returning the same assignments (memberConfigs)
@@ -436,11 +480,12 @@ public class IncrementalCooperativeAssignorTest {
         // or the workers that were bounced. Therefore it goes into assignment freeze for
         // the new assignments for a rebalance delay period
         doReturn(Collections.EMPTY_MAP).when(assignor).serializeAssignments(assignmentsCapture.capture());
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
         assertDelay(rebalanceDelay, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1", "worker2");
 
         time.sleep(rebalanceDelay / 2);
@@ -449,11 +494,12 @@ public class IncrementalCooperativeAssignorTest {
         // been reached yet
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(rebalanceDelay / 2, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 0, "worker1", "worker2");
 
         time.sleep(rebalanceDelay / 2 + 1);
@@ -461,15 +507,18 @@ public class IncrementalCooperativeAssignorTest {
         // Fourth assignment after delay expired. Finally all the new assignments are assigned
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(2, 8, 0, 0, "worker1", "worker2");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -483,11 +532,12 @@ public class IncrementalCooperativeAssignorTest {
 
         // First assignment with 2 workers and 2 connectors configured but not yet assigned
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(2, 8, 0, 0, "worker1", "worker2");
 
         when(coordinator.configSnapshot()).thenReturn(configState);
@@ -500,7 +550,7 @@ public class IncrementalCooperativeAssignorTest {
         memberConfigs = memberConfigs(leader, offset, assignments);
         memberConfigs.put("worker3", new ExtendedWorkerState(leaderUrl, offset, null));
         try {
-            assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+            assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         } catch (RuntimeException e) {
             RequestFuture.failure(e);
         }
@@ -509,20 +559,24 @@ public class IncrementalCooperativeAssignorTest {
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
         // This was the assignment that should have been sent, but didn't make it after all the way
         assertDelay(0, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 2, "worker1", "worker2", "worker3");
 
         // Third assignment happens with members returning the same assignments (memberConfigs)
         // as the first time.
         doReturn(Collections.EMPTY_MAP).when(assignor).serializeAssignments(assignmentsCapture.capture());
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
         assertDelay(0, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 0, 2, "worker1", "worker2", "worker3");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -533,11 +587,12 @@ public class IncrementalCooperativeAssignorTest {
 
         // First assignment with 1 worker and 2 connectors configured but not yet assigned
         memberConfigs.put("worker2", new ExtendedWorkerState(leaderUrl, offset, null));
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(3, 12, 0, 0, "worker1", "worker2");
 
         // Second assignment with an updated config state that reflects removal of a connector
@@ -545,15 +600,18 @@ public class IncrementalCooperativeAssignorTest {
         when(coordinator.configSnapshot()).thenReturn(configState);
         applyAssignments(returnedAssignments);
         memberConfigs = memberConfigs(leader, offset, assignments);
-        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator);
+        assignor.performTaskAssignment(leader, offset, memberConfigs, coordinator, protocolVersion);
         ++rebalanceNum;
         returnedAssignments = assignmentsCapture.getValue();
         assertDelay(0, returnedAssignments);
         expectedMemberConfigs = memberConfigs(leader, offset, returnedAssignments);
+        assertNoReassignments(memberConfigs, expectedMemberConfigs);
         assertAssignment(0, 0, 1, 4, "worker1", "worker2");
 
         verify(coordinator, times(rebalanceNum)).configSnapshot();
         verify(coordinator, times(rebalanceNum)).leaderState(any());
+        verify(coordinator, times(rebalanceNum)).generationId();
+        verify(coordinator, times(rebalanceNum)).memberId();
     }
 
     @Test
@@ -945,6 +1003,7 @@ public class IncrementalCooperativeAssignorTest {
                                                          int taskNum) {
         return new ClusterConfigState(
                 offset,
+                null,
                 connectorTaskCounts(1, connectorNum, taskNum),
                 connectorConfigs(1, connectorNum),
                 connectorTargetStates(1, connectorNum, TargetState.STARTED),
@@ -1021,7 +1080,7 @@ public class IncrementalCooperativeAssignorTest {
 
     private ExtendedAssignment newExpandableAssignment() {
         return new ExtendedAssignment(
-                CONNECT_PROTOCOL_V1,
+                protocolVersion,
                 ConnectProtocol.Assignment.NO_ERROR,
                 leader,
                 leaderUrl,
@@ -1075,5 +1134,55 @@ public class IncrementalCooperativeAssignorTest {
         newAssignments.values().stream()
                 .forEach(a -> assertEquals(
                         "Wrong rebalance delay in " + a, expectedDelay, a.delay()));
+    }
+
+    private void assertNoReassignments(Map<String, ExtendedWorkerState> existingAssignments,
+                                       Map<String, ExtendedWorkerState> newAssignments) {
+        assertNoDuplicateInAssignment(existingAssignments);
+        assertNoDuplicateInAssignment(newAssignments);
+
+        List<String> existingConnectors = existingAssignments.values().stream()
+                .flatMap(a -> a.assignment().connectors().stream())
+                .collect(Collectors.toList());
+        List<String> newConnectors = newAssignments.values().stream()
+                .flatMap(a -> a.assignment().connectors().stream())
+                .collect(Collectors.toList());
+
+        List<ConnectorTaskId> existingTasks = existingAssignments.values().stream()
+                .flatMap(a -> a.assignment().tasks().stream())
+                .collect(Collectors.toList());
+
+        List<ConnectorTaskId> newTasks = newAssignments.values().stream()
+                .flatMap(a -> a.assignment().tasks().stream())
+                .collect(Collectors.toList());
+
+        existingConnectors.retainAll(newConnectors);
+        assertThat("Found connectors in new assignment that already exist in current assignment",
+                Collections.emptyList(),
+                is(existingConnectors));
+        existingTasks.retainAll(newTasks);
+        assertThat("Found tasks in new assignment that already exist in current assignment",
+                Collections.emptyList(),
+                is(existingConnectors));
+    }
+
+    private void assertNoDuplicateInAssignment(Map<String, ExtendedWorkerState> existingAssignment) {
+        List<String> existingConnectors = existingAssignment.values().stream()
+                .flatMap(a -> a.assignment().connectors().stream())
+                .collect(Collectors.toList());
+        Set<String> existingUniqueConnectors = new HashSet<>(existingConnectors);
+        existingConnectors.removeAll(existingUniqueConnectors);
+        assertThat("Connectors should be unique in assignments but duplicates where found",
+                Collections.emptyList(),
+                is(existingConnectors));
+
+        List<ConnectorTaskId> existingTasks = existingAssignment.values().stream()
+                .flatMap(a -> a.assignment().tasks().stream())
+                .collect(Collectors.toList());
+        Set<ConnectorTaskId> existingUniqueTasks = new HashSet<>(existingTasks);
+        existingTasks.removeAll(existingUniqueTasks);
+        assertThat("Tasks should be unique in assignments but duplicates where found",
+                Collections.emptyList(),
+                is(existingTasks));
     }
 }
